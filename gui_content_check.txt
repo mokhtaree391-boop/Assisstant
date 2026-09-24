@@ -1,0 +1,528 @@
+import os
+import re
+import sqlite3
+import requests
+from flask import Flask, request, jsonify, render_template_string
+from app.tools import web_search, read_file, write_file, ssh_exec
+
+app = Flask(__name__)
+
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+MODEL = "qwen2.5:7b"
+DB_PATH = "C:/AI_Assistant/memory.db"
+
+
+# ---------- MEMORY ----------
+
+def get_memory():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, content, category
+        FROM memories
+        ORDER BY id DESC
+        LIMIT 50
+    """)
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        return "حافظه خالی است."
+
+    return "\n".join(
+        f"{r[0]} [{r[2]}] {r[1]}" for r in rows
+    )
+
+
+def save_memory(text):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO memories (content, category) VALUES (?, ?)",
+        (text, "عمومی")
+    )
+    conn.commit()
+    conn.close()
+
+
+# ---------- TOOL DETECTION ----------
+
+def detect_tool(text):
+
+    # read file
+    patterns = [
+        r"(?:فایل|کد)\s+([A-Za-z]:[\\/][^\n]+?)\s+(?:را\s+)?بخوان",
+        r"(?:فایل|کد)\s+([A-Za-z]:[\\/][^\n]+?)\s+(?:را\s+)?بررسی کن",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            path = m.group(1).strip().rstrip("،,.")
+            return "read_file", {"file_path": path}
+
+    # web search
+    search_words = [
+        "در اینترنت جستجو کن",
+        "در اینترنت جستجو",
+        "جستجوی اینترنتی",
+        "وب را جستجو کن",
+        "در وب جستجو کن"
+    ]
+
+    for word in search_words:
+        if word in text:
+            query = text.replace(word, "").strip()
+            return "web_search", {"query": query}
+
+    return None, None
+
+
+# ---------- OLLAMA ----------
+
+def ask_qwen(messages):
+
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "stream": False,
+        "options": {
+            "temperature": 0.1,
+            "num_ctx": 16384,
+            "num_predict": 1024
+        }
+    }
+
+    r = requests.post(
+        OLLAMA_URL,
+        json=payload,
+        timeout=600
+    )
+
+    r.raise_for_status()
+
+    return r.json()["message"]["content"]
+
+
+# ---------- TOOL EXECUTION ----------
+
+def execute_tool(name, args):
+
+    if name == "read_file":
+        path = args["file_path"]
+        content = read_file(path)
+
+        if content.startswith("خطا"):
+            return content
+
+        lines = content.splitlines()
+        functions = []
+        classes = []
+
+        for line in lines:
+            s = line.strip()
+
+            if s.startswith("def "):
+                functions.append(s.split("(")[0].replace("def ", ""))
+
+            if s.startswith("class "):
+                classes.append(s.split(":")[0].replace("class ", ""))
+
+        return (
+            f"FILE_PATH: {path}\n"
+            f"LINE_COUNT: {len(lines)}\n"
+            f"FUNCTIONS: {', '.join(functions) if functions else 'ندارد'}\n"
+            f"CLASSES: {', '.join(classes) if classes else 'ندارد'}\n\n"
+            f"FILE_CONTENT:\n{content}"
+        )
+
+    elif name == "web_search":
+        return web_search(args["query"])
+
+    elif name == "write_file":
+        return write_file(
+            args["file_path"],
+            args["content"]
+        )
+
+    elif name == "ssh_exec":
+        return ssh_exec(
+            args["hostname"],
+            args["username"],
+            args["password"],
+            args["command"],
+            args.get("port", 22)
+        )
+
+    else:
+        return "ابزار ناشناخته است."
+
+
+# ---------- SYSTEM ----------
+
+SYSTEM = """
+تو یک دستیار هوشمند فارسی هستی.
+
+نام: دستیار
+
+وظیفه:
+- پاسخ‌گویی فارسی
+- برنامه‌نویسی
+- تحلیل کد
+- توسعه وب
+- مدیریت فایل‌ها
+- کمک فنی
+
+قانون بسیار مهم:
+وقتی نتیجه یک ابزار در پیام به تو داده می‌شود،
+فقط بر اساس همان نتیجه پاسخ بده.
+هرگز محتوای فایل یا نتیجه جستجو را حدس نزن.
+
+پاسخ‌ها دقیق، کوتاه و کاربردی باشند.
+"""
+
+
+# ---------- HTML ----------
+
+HTML = """
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+
+<title>دستیار هوش مصنوعی</title>
+
+<style>
+
+body {
+    margin:0;
+    background:#f1f7f3;
+    font-family:Tahoma,Arial,sans-serif;
+}
+
+header {
+    background:#dcefe5;
+    padding:18px;
+    text-align:center;
+}
+
+header h2 {
+    margin:0;
+}
+
+#chat {
+    max-width:1000px;
+    height:70vh;
+    overflow-y:auto;
+    margin:20px auto;
+    padding:20px;
+    background:white;
+    border-radius:18px;
+}
+
+.msg {
+    padding:14px;
+    margin:10px 0;
+    border-radius:14px;
+    white-space:pre-wrap;
+    line-height:2;
+}
+
+.user {
+    background:#e2f1e8;
+}
+
+.ai {
+    background:#f7f0e5;
+}
+
+#inputbox {
+    max-width:1000px;
+    margin:auto;
+    display:flex;
+    gap:10px;
+}
+
+textarea {
+    flex:1;
+    resize:none;
+    border:1px solid #bbb;
+    border-radius:12px;
+    padding:14px;
+    font-family:Tahoma;
+    font-size:15px;
+}
+
+button {
+    width:100px;
+    border:0;
+    border-radius:12px;
+    background:#67977c;
+    color:white;
+    font-size:15px;
+    cursor:pointer;
+}
+
+</style>
+</head>
+
+<body>
+
+<header>
+<h2>دستیار هوش مصنوعی</h2>
+<div>Qwen 2.5 7B • حافظه • ابزارها</div>
+</header>
+
+<div id="chat"></div>
+
+<div id="inputbox">
+
+<textarea
+id="input"
+rows="3"
+placeholder="پیام خود را بنویسید..."
+></textarea>
+
+<button onclick="send()">ارسال</button>
+
+</div>
+
+<script>
+
+function add(text,type) {
+
+    const d=document.createElement("div");
+
+    d.className="msg "+type;
+
+    d.textContent=text;
+
+    document.getElementById("chat").appendChild(d);
+
+    d.scrollTop=d.scrollHeight;
+
+    window.scrollTo(0,document.body.scrollHeight);
+}
+
+
+async function send() {
+
+    const box=document.getElementById("input");
+
+    const text=box.value.trim();
+
+    if(!text) return;
+
+    add(text,"user");
+
+    box.value="";
+
+    add("در حال پردازش...","ai");
+
+    try {
+
+        const r=await fetch("/chat",{
+            method:"POST",
+            headers:{
+                "Content-Type":"application/json"
+            },
+            body:JSON.stringify({
+                message:text
+            })
+        });
+
+        const data=await r.json();
+
+        const chat=document.getElementById("chat");
+
+        chat.removeChild(chat.lastChild);
+
+        add(
+            data.response || data.error,
+            "ai"
+        );
+
+    } catch(e) {
+
+        add("خطا: "+e,"ai");
+
+    }
+}
+
+
+document.getElementById("input")
+.addEventListener("keydown",function(e){
+
+    if(e.key==="Enter" && !e.shiftKey){
+
+        e.preventDefault();
+
+        send();
+
+    }
+
+});
+
+</script>
+
+</body>
+</html>
+"""
+
+
+# ---------- ROUTES ----------
+
+@app.route("/")
+def home():
+    return render_template_string(HTML)
+
+
+@app.route("/chat", methods=["POST"])
+def chat():
+
+    try:
+
+        user = request.json.get("message","").strip()
+
+        if not user:
+            return jsonify({
+                "response":"لطفاً پیام خود را وارد کنید."
+            })
+
+        # memory
+        if user.startswith("یادداشت کن "):
+
+            text = user[len("یادداشت کن "):].strip()
+
+            save_memory(text)
+
+            return jsonify({
+                "response":"در حافظه دائمی ذخیره شد."
+            })
+
+        if user.startswith("ذخیره کن "):
+
+            text = user[len("ذخیره کن "):].strip()
+
+            save_memory(text)
+
+            return jsonify({
+                "response":"در حافظه دائمی ذخیره شد."
+            })
+
+        if user == "حافظه":
+
+            return jsonify({
+                "response":get_memory()
+            })
+
+
+        # DIRECT TOOL DETECTION
+
+        tool, args = detect_tool(user)
+
+        print("=" * 50)
+        print("DEBUG >> پیام دریافتی از کاربر:")
+        print(repr(user))
+        print("DEBUG >> ابزار تشخیص داده شده:", tool)
+        print("DEBUG >> آرگومان‌ها:", args)
+        print("=" * 50)
+
+        if tool:
+
+            result = execute_tool(tool,args)
+
+            print("DEBUG >> طول نتیجه ابزار (کاراکتر):", len(result) if result else 0)
+            print("DEBUG >> 300 کاراکتر ابتدای نتیجه:")
+            print(result[:300] if result else "(خالی است!)")
+            print("=" * 50)
+
+            messages = [
+
+                {
+                    "role":"system",
+                    "content": SYSTEM + "\n\nحافظه دائمی:\n" + get_memory()
+                },
+
+                {
+                    "role":"user",
+                    "content":
+                    f"""درخواست کاربر:
+{user}
+
+ابزار اجرا شده:
+{tool}
+
+نتیجه واقعی ابزار:
+----------------
+{result}
+----------------
+
+اکنون فقط بر اساس نتیجه واقعی بالا پاسخ بده.
+اگر LINE_COUNT وجود دارد، همان عدد را دقیقاً گزارش کن؛ هرگز حدس نزن.
+اگر فایل خوانده شده، تحلیل را فقط از روی FILE_CONTENT واقعی انجام بده.
+"""
+                }
+
+            ]
+
+            answer = ask_qwen(messages)
+
+            return jsonify({
+                "response":answer
+            })
+
+
+        # NORMAL CHAT
+
+        messages = [
+
+            {
+                "role":"system",
+                "content":SYSTEM
+            },
+
+            {
+                "role":"system",
+                "content":
+                "حافظه دائمی:\n" + get_memory()
+            },
+
+            {
+                "role":"user",
+                "content":user
+            }
+
+        ]
+
+        answer = ask_qwen(messages)
+
+        return jsonify({
+            "response":answer
+        })
+
+
+    except Exception as e:
+
+        return jsonify({
+            "error":str(e)
+        }),500
+
+
+# ---------- START ----------
+
+if __name__ == "__main__":
+
+    print("================================")
+    print("AI Assistant")
+    print("Model: qwen2.5:7b")
+    print("http://127.0.0.1:5000")
+    print("================================")
+
+    app.run(
+        host="127.0.0.1",
+        port=5000,
+        debug=False
+    )
