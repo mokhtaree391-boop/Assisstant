@@ -4,18 +4,14 @@ import requests
 from datetime import datetime
 
 # ---------- تنظیمات مدل تصویری (Vision) ----------
-# این مدل جدا از مدل اصلی ایجنت (qwen2.5:7b) است و فقط برای «دیدن» اسکرین‌شات صفحه استفاده می‌شود.
-# قبل از استفاده باید نصبش کنید:  ollama pull qwen2.5vl:7b
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 VISION_MODEL = os.environ.get("VISION_MODEL", "qwen2.5vl:7b")
-
 SCREENSHOTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screenshots")
 
 
 def _describe_screenshot(image_path: str, question: str = None) -> str:
     """
-    اسکرین‌شات را به یک مدل vision در Ollama می‌دهد و توضیح متنی از آنچه
-    در صفحه دیده می‌شود (چیدمان، دکمه‌ها، فرم‌ها، متن‌های مهم و ...) برمی‌گرداند.
+    اسکرین‌شات را به مدل تصویری می‌دهد تا بفهمد صفحه چه شکلی است.
     """
     try:
         with open(image_path, "rb") as f:
@@ -48,26 +44,14 @@ def _describe_screenshot(image_path: str, question: str = None) -> str:
         data = r.json()
         return data.get("message", {}).get("content", "").strip() or "مدل تصویری پاسخ خالی برگرداند."
     except requests.exceptions.ConnectionError:
-        return (
-            "خطا: اتصال به Ollama برقرار نشد. مطمئن شوید Ollama در حال اجراست "
-            "(دستور: ollama serve)."
-        )
-    except requests.exceptions.HTTPError as e:
-        return (
-            f"خطا در فراخوانی مدل تصویری «{VISION_MODEL}». احتمالاً این مدل نصب نیست.\n"
-            f"برای نصب در ترمینال بزنید: ollama pull {VISION_MODEL}\n"
-            f"جزئیات فنی: {e}"
-        )
+        return "خطا: اتصال به Ollama برقرار نشد. مطمئن شوید Ollama در حال اجراست."
     except Exception as e:
         return f"خطا در تحلیل تصویری صفحه: {e}"
 
 
 def open_browser(url: str = "https://www.google.com", see_page: bool = True) -> str:
     """
-    یک صفحه مرورگر کروم واقعی روی سیستم باز می‌کند، به آدرس مورد نظر می‌رود،
-    از صفحه اسکرین‌شات می‌گیرد و آن را به یک مدل تصویری (vision) می‌دهد تا ایجنت
-    بتواند بفهمد صفحه از نظر بصری چه شکلی است (نه فقط متن خام آن)، سپس محتوای
-    متنی صفحه را هم استخراج می‌کند. مرورگر باز می‌ماند تا کاربر خودش آن را ببندد.
+    مرورگر را باز می‌کند، اسکرین‌شات می‌گیرد، متن صفحه را می‌خواند و همه را برمی‌گرداند.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -80,7 +64,7 @@ def open_browser(url: str = "https://www.google.com", see_page: bool = True) -> 
 
     try:
         with sync_playwright() as p:
-            # باز کردن مرورگر به صورت کاملاً نمایشی و تمام‌صفحه
+            # باز کردن مرورگر
             browser = p.chromium.launch(channel="chrome", headless=False, args=["--start-maximized"])
             page = browser.new_page(no_viewport=True)
             page.goto(url)
@@ -89,11 +73,12 @@ def open_browser(url: str = "https://www.google.com", see_page: bool = True) -> 
             # انتظار برای لود کامل محتوای صفحه
             page.wait_for_load_state("domcontentloaded", timeout=15000)
 
-            # استخراج محتوای متنی بدنه صفحه
+            # ---------- ۱. استخراج محتوای متنی بدنه صفحه ----------
+            # این همون کدیه که متن صفحه رو می‌خونه
             page_content = page.inner_text("body")
             trimmed_content = page_content[:1500] + "..." if len(page_content) > 1500 else page_content
 
-            # ---------- گرفتن اسکرین‌شات و تحلیل بصری صفحه ----------
+            # ---------- ۲. گرفتن اسکرین‌شات و تحلیل بصری صفحه ----------
             vision_description = None
             if see_page:
                 try:
@@ -108,24 +93,21 @@ def open_browser(url: str = "https://www.google.com", see_page: bool = True) -> 
 
             print("مرورگر باز است. برای ادامه، پنجره را به صورت دستی ببندید...")
 
-            # صبر نامحدود تا کاربر خودش پنجره مرورگر را ببندد (timeout=0 یعنی بدون محدودیت زمانی)
+            # صبر تا کاربر پنجره مرورگر را ببندد
             try:
                 page.wait_for_event("close", timeout=0)
             except Exception:
-                # اگر کاربر کل پنجره مرورگر (نه فقط تب) را ببندد، ممکن است رویداد close
-                # به همین شکل fire نشود؛ در این صورت منتظر قطع اتصال کامل مرورگر می‌مانیم
                 try:
                     browser.wait_for_event("disconnected", timeout=0)
                 except Exception:
                     pass
 
-            # اطمینان از بسته شدن کامل (اگر کاربر قبلاً بسته باشد، این خط خطا نمی‌دهد)
             try:
                 browser.close()
             except Exception:
                 pass
 
-            # ---------- ساخت خروجی نهایی ----------
+            # ---------- ۳. ساخت خروجی نهایی ----------
             result = f"موفق! صفحه {url} باز و بررسی شد.\n"
             if see_page and vision_description:
                 result += f"\n--- توضیح تصویری صفحه (آنچه دیده می‌شود) ---\n{vision_description}\n"
@@ -137,4 +119,7 @@ def open_browser(url: str = "https://www.google.com", see_page: bool = True) -> 
 
 
 if __name__ == "__main__":
-    print(open_browser("https://shafadoc.ir/Account"))
+    # تست کردن تابع
+    result = open_browser("https://shafadoc.ir/Account")
+    print("\n\n========= نتیجه نهایی =========\n")
+    print(result)
